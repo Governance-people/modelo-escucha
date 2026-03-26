@@ -1,0 +1,927 @@
+
+import { useState, useEffect } from "react";
+
+// ── Storage helpers ──────────────────────────────────────────────────────────
+const s = {
+  async get(k) { try { const r = await window.storage.get(k); return r ? JSON.parse(r.value) : null; } catch { return null; } },
+  async set(k, v) { try { await window.storage.set(k, JSON.stringify(v)); } catch {} },
+};
+
+// ── Brand colors ─────────────────────────────────────────────────────────────
+const BRAND = {
+  orange: "#F47920",
+  teal: "#00A99D",
+  yellow: "#F5A623",
+  blue: "#00AEEF",
+  darkGray: "#58595B",
+  grad: "linear-gradient(135deg, #F47920, #F5A623, #00A99D, #00AEEF)",
+  gradOrange: "linear-gradient(135deg, #F47920, #F5A623)",
+  gradTeal: "linear-gradient(135deg, #00A99D, #00AEEF)",
+};
+
+// ── Logo SVG (transparent bg) ────────────────────────────────────────────────
+function Logo({ size = 48 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="lg1" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#F47920"/>
+          <stop offset="50%" stopColor="#00A99D"/>
+          <stop offset="100%" stopColor="#00AEEF"/>
+        </linearGradient>
+        <linearGradient id="lg2" x1="100%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stopColor="#F5A623"/>
+          <stop offset="100%" stopColor="#00A99D"/>
+        </linearGradient>
+      </defs>
+      {/* Top person - orange */}
+      <circle cx="60" cy="18" r="9" fill="#F47920"/>
+      {/* Left person - yellow */}
+      <circle cx="24" cy="90" r="9" fill="#F5A623"/>
+      {/* Right person - blue */}
+      <circle cx="96" cy="90" r="9" fill="#00AEEF"/>
+      {/* Interlocking arcs */}
+      <path d="M60 27 C80 27 95 50 85 70 L72 92 C85 85 100 72 100 55 C100 35 82 20 60 20" stroke="#F47920" strokeWidth="10" fill="none" strokeLinecap="round"/>
+      <path d="M33 80 C20 60 28 35 48 28 L62 24 C48 20 28 25 20 42 C12 58 20 78 33 88" stroke="#F5A623" strokeWidth="10" fill="none" strokeLinecap="round"/>
+      <path d="M87 80 C74 100 50 102 38 88 L26 70 C30 85 42 100 58 100 C75 100 90 90 95 78" stroke="#00AEEF" strokeWidth="10" fill="none" strokeLinecap="round"/>
+    </svg>
+  );
+}
+
+// ── Constants ────────────────────────────────────────────────────────────────
+const SCALE = { 1: 0, 2: 25, 3: 50, 4: 75, 5: 100 };
+const MESES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+
+const CLUSTER_META = {
+  "Saludable":         { color: "#16a34a", bg: "#f0fdf4", icon: "🟢", cta: "Sostén y potencia" },
+  "Observación":       { color: "#ca8a04", bg: "#fefce8", icon: "🟡", cta: "Abre conversaciones" },
+  "Riesgo":            { color: "#ea580c", bg: "#fff7ed", icon: "🟠", cta: "Corrige el rumbo con un Plan" },
+  "Crítico":           { color: "#dc2626", bg: "#fef2f2", icon: "🔴", cta: "Es crítico que tengas un plan" },
+  "Crítico Sostenido": { color: "#7f1d1d", bg: "#fef2f2", icon: "🔴🔴", cta: "Redefine ahora tu plan" },
+};
+
+const ROLES = ["Colaborador","Líder","Líder del Líder","LT / HR","Admin"];
+
+function cicloLabel(ciclo) {
+  // "2025-M03" → "Marzo 2025"
+  const match = ciclo.match(/(\d{4})-M(\d{2})/);
+  if (match) { const m = parseInt(match[2],10); return `${MESES[m-1]} ${match[1]}`; }
+  return ciclo;
+}
+
+// ── Pure calculations ────────────────────────────────────────────────────────
+function scoreTotal(l, c, e) { return Math.round(0.4*l + 0.3*c + 0.3*e); }
+function calcCluster(score, recurrencia, tendenciaPts) {
+  if (score < 60 && recurrencia >= 3 && tendenciaPts <= -5) return "Crítico Sostenido";
+  if (score < 60 && recurrencia >= 2) return "Crítico";
+  if (tendenciaPts <= -5) return "Riesgo";
+  if (score >= 75) return "Saludable";
+  return "Observación";
+}
+function calcTendencia(historial) {
+  if (historial.length < 2) return { pts: 0, label: "Sin datos" };
+  const actual = historial[historial.length-1].scoreTotal;
+  const ref = historial[Math.max(0,historial.length-3)].scoreTotal;
+  const pts = actual - ref;
+  return { pts, label: pts >= 5 ? "Mejora" : pts <= -5 ? "Deterioro" : "Estable" };
+}
+function calcRecurrencia(historial) { return historial.slice(-4).filter(c => c.scoreTotal < 60).length; }
+function calcAlertas(historial) {
+  const alerts = [];
+  if (historial.length >= 3) {
+    const last3 = historial.slice(-3);
+    const dropping = last3.every((c,i) => i===0 || c.scoreTotal < last3[i-1].scoreTotal);
+    if (dropping && last3[0].scoreTotal - last3[last3.length-1].scoreTotal >= 10) alerts.push("Deterioro sostenido");
+  }
+  if (historial.length > 0) {
+    const last = historial[historial.length-1];
+    if (Math.abs(last.scoreLiderazgo - last.scoreEstado) > 20) alerts.push("Divergencia alta");
+  }
+  return alerts;
+}
+function getEstadoLider(liderId, data) {
+  const hist = data.ciclos.map(c => {
+    const r = data.respuestas.find(x => x.ciclo===c && x.liderId===liderId);
+    if (!r) return null;
+    return { ciclo:c, scoreLiderazgo:r.liderazgo, scoreCultura:r.cultura, scoreEstado:r.estado, scoreTotal:scoreTotal(r.liderazgo,r.cultura,r.estado) };
+  }).filter(Boolean);
+  if (!hist.length) return null;
+  const tendencia = calcTendencia(hist);
+  const recurrencia = calcRecurrencia(hist);
+  const cluster = calcCluster(hist[hist.length-1].scoreTotal, recurrencia, tendencia.pts);
+  const alertas = calcAlertas(hist);
+  return { hist, tendencia, recurrencia, cluster, alertas, last:hist[hist.length-1] };
+}
+
+// ── Seed data ────────────────────────────────────────────────────────────────
+const SEED = {
+  lideres: [
+    { id:"L1", nombre:"Ana García", email:"ana@solvo.com" },
+    { id:"L2", nombre:"Carlos Méndez", email:"carlos@solvo.com" },
+    { id:"L3", nombre:"Sofía Ríos", email:"sofia@solvo.com" },
+  ],
+  colaboradores: [
+    { id:"C1", nombre:"Juan Pérez", email:"juan@solvo.com", liderId:"L1" },
+    { id:"C2", nombre:"María López", email:"maria@solvo.com", liderId:"L1" },
+    { id:"C3", nombre:"Pedro Ruiz", email:"pedro@solvo.com", liderId:"L2" },
+    { id:"C4", nombre:"Laura Díaz", email:"laura@solvo.com", liderId:"L3" },
+  ],
+  lideresDeLider: [
+    { id:"LL1", nombre:"Roberto Vega", email:"roberto@solvo.com", lideresACargo:["L1","L2"] },
+  ],
+  ciclos: ["2025-M01","2025-M02","2025-M03"],
+  cicloActivo: "2025-M03",
+  respuestas: [
+    { ciclo:"2025-M01", liderId:"L1", liderazgo:75, cultura:75, estado:75 },
+    { ciclo:"2025-M02", liderId:"L1", liderazgo:50, cultura:50, estado:50 },
+    { ciclo:"2025-M03", liderId:"L1", liderazgo:25, cultura:25, estado:25 },
+    { ciclo:"2025-M01", liderId:"L2", liderazgo:75, cultura:100, estado:75 },
+    { ciclo:"2025-M02", liderId:"L2", liderazgo:75, cultura:75, estado:100 },
+    { ciclo:"2025-M03", liderId:"L2", liderazgo:100, cultura:75, estado:100 },
+    { ciclo:"2025-M01", liderId:"L3", liderazgo:50, cultura:75, estado:50 },
+    { ciclo:"2025-M02", liderId:"L3", liderazgo:50, cultura:50, estado:50 },
+    { ciclo:"2025-M03", liderId:"L3", liderazgo:25, cultura:25, estado:50 },
+  ],
+  planesAccion: [], alertasAsignacion: [], encuestasCompletadas: [], conversaciones: [],
+};
+
+// ── Star Rating ──────────────────────────────────────────────────────────────
+function StarRating({ value, onChange }) {
+  const [hover, setHover] = useState(0);
+  return (
+    <div className="flex gap-1 justify-center">
+      {[1,2,3,4,5].map(n => (
+        <button key={n} type="button"
+          onMouseEnter={() => setHover(n)} onMouseLeave={() => setHover(0)}
+          onClick={() => onChange(n)}
+          style={{ background:"none", border:"none", cursor:"pointer", padding:"2px" }}>
+          <svg width="36" height="36" viewBox="0 0 24 24">
+            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"
+              fill={(hover||value)>=n ? BRAND.orange : "#e5e7eb"}
+              stroke={(hover||value)>=n ? BRAND.orange : "#d1d5db"}
+              strokeWidth="1"/>
+          </svg>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ── App ──────────────────────────────────────────────────────────────────────
+export default function App() {
+  const [rol, setRol] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      let d = await s.get("escucha_data_v2");
+      if (!d) { d = SEED; await s.set("escucha_data_v2", d); }
+      setData(d); setLoading(false);
+    })();
+  }, []);
+
+  const save = async (nd) => { setData(nd); await s.set("escucha_data_v2", nd); };
+
+  if (loading) return (
+    <div className="flex items-center justify-center h-screen" style={{ background: "#f8f9fa" }}>
+      <div className="text-center">
+        <Logo size={56} />
+        <p className="mt-3 text-gray-400 text-sm">Cargando...</p>
+      </div>
+    </div>
+  );
+
+  if (!rol) return <RolSelector onSelect={(r,id) => { setRol(r); setUserId(id); }} data={data} />;
+
+  return (
+    <div className="min-h-screen" style={{ background:"#f5f6f8" }}>
+      <Header rol={rol} onLogout={() => { setRol(null); setUserId(null); }} />
+      {rol==="Colaborador"     && <VistaColaborador data={data} save={save} userId={userId} />}
+      {rol==="Líder"           && <VistaLider data={data} save={save} userId={userId} />}
+      {rol==="Líder del Líder" && <VistaLiderDelLider data={data} save={save} userId={userId} />}
+      {rol==="LT / HR"         && <VistaDashboard data={data} save={save} />}
+      {rol==="Admin"           && <VistaAdmin data={data} save={save} />}
+    </div>
+  );
+}
+
+// ── Header ───────────────────────────────────────────────────────────────────
+function Header({ rol, onLogout }) {
+  return (
+    <div style={{ background: "#fff", borderBottom: `3px solid ${BRAND.orange}` }} className="px-6 py-3 flex items-center justify-between shadow-sm">
+      <div className="flex items-center gap-3">
+        <Logo size={38} />
+        <div>
+          <p style={{ color: BRAND.darkGray, fontWeight:700, fontSize:14, lineHeight:1 }}>Governance & Innovation</p>
+          <p style={{ color: BRAND.orange, fontWeight:700, fontSize:13, lineHeight:1.4 }}>People</p>
+        </div>
+        <span style={{ color:"#d1d5db", margin:"0 8px" }}>|</span>
+        <span style={{ color: BRAND.teal, fontSize:13, fontWeight:600 }}>Escucha Continua</span>
+      </div>
+      <div className="flex items-center gap-3">
+        <span className="px-3 py-1 rounded-full text-sm font-medium text-white" style={{ background: BRAND.gradOrange }}>{rol}</span>
+        <button onClick={onLogout} style={{ color: BRAND.darkGray, fontSize:13 }} className="hover:underline">Salir</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Rol Selector ─────────────────────────────────────────────────────────────
+function RolSelector({ onSelect, data }) {
+  const [rol, setRol] = useState("");
+  const [userId, setUserId] = useState("");
+
+  const usersForRol = () => {
+    if (rol==="Colaborador") return data.colaboradores;
+    if (rol==="Líder") return data.lideres;
+    if (rol==="Líder del Líder") return data.lideresDeLider;
+    return [];
+  };
+  const canProceed = () => { if (!rol) return false; if (["LT / HR","Admin"].includes(rol)) return true; return !!userId; };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center" style={{ background: "linear-gradient(135deg,#f8f9fa,#e8f4f8)" }}>
+      <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md" style={{ border: `1px solid #e5e7eb` }}>
+        <div className="text-center mb-7">
+          <div className="flex justify-center mb-3"><Logo size={64} /></div>
+          <p style={{ color: BRAND.darkGray, fontWeight:700, fontSize:18 }}>Governance & Innovation</p>
+          <p style={{ color: BRAND.orange, fontWeight:800, fontSize:16 }}>People</p>
+          <div style={{ height:3, background: BRAND.grad, borderRadius:4, margin:"12px auto 0", width:80 }} />
+          <p className="text-gray-400 text-sm mt-3">Modelo de Escucha Continua</p>
+        </div>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium mb-1" style={{ color: BRAND.darkGray }}>Seleccioná tu rol</label>
+            <select className="w-full border rounded-xl px-3 py-2 text-sm" style={{ borderColor:"#d1d5db", color: BRAND.darkGray }}
+              value={rol} onChange={e => { setRol(e.target.value); setUserId(""); }}>
+              <option value="">-- Elegir rol --</option>
+              {ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+            </select>
+          </div>
+          {rol && !["LT / HR","Admin"].includes(rol) && (
+            <div>
+              <label className="block text-sm font-medium mb-1" style={{ color: BRAND.darkGray }}>Identificate</label>
+              <select className="w-full border rounded-xl px-3 py-2 text-sm" style={{ borderColor:"#d1d5db" }}
+                value={userId} onChange={e => setUserId(e.target.value)}>
+                <option value="">-- Seleccionar --</option>
+                {usersForRol().map(u => <option key={u.id} value={u.id}>{u.nombre}</option>)}
+              </select>
+            </div>
+          )}
+          <button disabled={!canProceed()} onClick={() => onSelect(rol, userId)}
+            className="w-full py-3 rounded-xl font-semibold text-white text-sm transition"
+            style={{ background: canProceed() ? BRAND.gradOrange : "#d1d5db", cursor: canProceed()?"pointer":"not-allowed", border:"none" }}>
+            Ingresar →
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Vista Colaborador ─────────────────────────────────────────────────────────
+function VistaColaborador({ data, save, userId }) {
+  const colab = data.colaboradores.find(c => c.id===userId);
+  const lider = data.lideres.find(l => l.id===colab?.liderId);
+  const [step, setStep] = useState("confirm");
+  const [resp, setResp] = useState({ liderazgo:0, cultura:0, estado:0 });
+
+  const yaRespondio = data.encuestasCompletadas?.some(e => e.colaboradorId===userId && e.ciclo===data.cicloActivo);
+
+  if (yaRespondio) return (
+    <div className="flex items-center justify-center min-h-screen p-6">
+      <div className="bg-white rounded-2xl shadow p-8 max-w-md text-center" style={{ border:`2px solid ${BRAND.teal}` }}>
+        <div className="text-5xl mb-4">✅</div>
+        <h2 className="text-xl font-bold" style={{ color: BRAND.darkGray }}>¡Ya respondiste este ciclo!</h2>
+        <p className="text-gray-500 mt-2 text-sm">Tu respuesta fue registrada para <strong>{cicloLabel(data.cicloActivo)}</strong>. Gracias por tu participación.</p>
+      </div>
+    </div>
+  );
+
+  if (step==="alerta") return (
+    <div className="flex items-center justify-center min-h-screen p-6">
+      <div className="bg-white rounded-2xl shadow p-8 max-w-md text-center" style={{ border:`2px solid ${BRAND.orange}` }}>
+        <div className="text-5xl mb-4">⚠️</div>
+        <h2 className="text-xl font-bold" style={{ color: BRAND.darkGray }}>Alerta enviada</h2>
+        <p className="text-gray-500 mt-2 text-sm">El equipo de People & Culture fue notificado para corregir tu asignación. Podrás responder una vez que sea actualizada.</p>
+      </div>
+    </div>
+  );
+
+  if (step==="done") return (
+    <div className="flex items-center justify-center min-h-screen p-6">
+      <div className="bg-white rounded-2xl shadow p-8 max-w-md text-center" style={{ border:`2px solid ${BRAND.teal}` }}>
+        <div className="text-5xl mb-4">🙌</div>
+        <h2 className="text-xl font-bold" style={{ color: BRAND.darkGray }}>¡Gracias por tu respuesta!</h2>
+        <p className="text-gray-500 mt-2 text-sm">Tu feedback fue registrado de forma anónima y ayuda a mejorar la experiencia del equipo.</p>
+      </div>
+    </div>
+  );
+
+  if (step==="confirm") return (
+    <div className="flex items-center justify-center min-h-screen p-4">
+      <div className="bg-white rounded-2xl shadow-xl p-8 max-w-md w-full">
+        <div className="text-center mb-6">
+          <div className="flex justify-center mb-2"><Logo size={44} /></div>
+          <h2 className="text-xl font-bold" style={{ color: BRAND.darkGray }}>Encuesta mensual</h2>
+          <p className="text-sm mt-1" style={{ color: BRAND.teal }}>{cicloLabel(data.cicloActivo)}</p>
+        </div>
+        <div className="rounded-xl p-5 mb-6 text-center" style={{ background:"#fff8f3", border:`1px solid ${BRAND.orange}` }}>
+          <p className="text-gray-500 text-sm mb-1">Tu líder asignado es:</p>
+          <p className="text-2xl font-bold" style={{ color: BRAND.darkGray }}>{lider?.nombre || "Sin asignar"}</p>
+        </div>
+        <p className="text-center text-gray-500 text-sm mb-5">¿Es correcto?</p>
+        <div className="flex gap-3">
+          <button onClick={() => setStep("encuesta")}
+            className="flex-1 py-3 rounded-xl font-semibold text-white text-sm"
+            style={{ background: BRAND.gradTeal, border:"none", cursor:"pointer" }}>✓ Sí, es correcto</button>
+          <button onClick={() => {
+            const nd = { ...data, alertasAsignacion:[...(data.alertasAsignacion||[]),{ colaboradorId:userId, nombre:colab?.nombre, ciclo:data.cicloActivo, fecha:new Date().toLocaleDateString() }] };
+            save(nd); setStep("alerta");
+          }} className="flex-1 py-3 rounded-xl font-semibold text-sm"
+            style={{ background:"#fef2f2", color:"#dc2626", border:"1px solid #fecaca", cursor:"pointer" }}>✗ No es correcto</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const preguntas = [
+    { key:"liderazgo", label:"Mi líder genera un espacio de escucha y cercanía donde puedo expresarme" },
+    { key:"cultura",   label:"Mi líder actúa de forma coherente con los valores y cultura de Solvo" },
+    { key:"estado",    label:"Hoy, ¿cómo te sentís trabajando en Solvo?" },
+  ];
+
+  const completo = resp.liderazgo && resp.cultura && resp.estado;
+
+  const enviar = () => {
+    const lScore = SCALE[resp.liderazgo], cScore = SCALE[resp.cultura], eScore = SCALE[resp.estado];
+    const existing = data.respuestas.find(r => r.ciclo===data.cicloActivo && r.liderId===colab.liderId);
+    let newResp;
+    if (existing) {
+      newResp = data.respuestas.map(r =>
+        r.ciclo===data.cicloActivo && r.liderId===colab.liderId
+          ? { ...r, liderazgo:Math.round((r.liderazgo+lScore)/2), cultura:Math.round((r.cultura+cScore)/2), estado:Math.round((r.estado+eScore)/2) }
+          : r
+      );
+    } else {
+      newResp = [...data.respuestas, { ciclo:data.cicloActivo, liderId:colab.liderId, liderazgo:lScore, cultura:cScore, estado:eScore }];
+    }
+    save({ ...data, respuestas:newResp, encuestasCompletadas:[...(data.encuestasCompletadas||[]),{ colaboradorId:userId, ciclo:data.cicloActivo }] });
+    setStep("done");
+  };
+
+  return (
+    <div className="flex items-center justify-center min-h-screen p-4">
+      <div className="bg-white rounded-2xl shadow-xl p-6 max-w-lg w-full">
+        <div className="text-center mb-5">
+          <h2 className="text-xl font-bold" style={{ color: BRAND.darkGray }}>¿Cómo te sentís?</h2>
+          <p className="text-gray-400 text-sm">{cicloLabel(data.cicloActivo)} · Respuestas anónimas · ~30 seg</p>
+          <div style={{ height:2, background:BRAND.grad, borderRadius:4, margin:"10px auto 0", width:60 }}/>
+        </div>
+        <div className="space-y-5">
+          {preguntas.map((p,i) => (
+            <div key={p.key} className="rounded-xl p-4" style={{ background:"#fafafa", border:"1px solid #f0f0f0" }}>
+              <p className="text-gray-700 text-sm font-medium text-center mb-3">
+                <span style={{ color: BRAND.orange, fontWeight:700 }}>{i+1}.</span> "{p.label}"
+              </p>
+              <StarRating value={resp[p.key]} onChange={v => setResp(r => ({...r,[p.key]:v}))} />
+              <div className="flex justify-between mt-1 px-1">
+                <span className="text-xs text-gray-400">Muy en desacuerdo</span>
+                <span className="text-xs text-gray-400">Muy de acuerdo</span>
+              </div>
+            </div>
+          ))}
+        </div>
+        <button disabled={!completo} onClick={enviar}
+          className="w-full mt-6 py-3 rounded-xl font-semibold text-white text-sm"
+          style={{ background: completo ? BRAND.gradOrange : "#d1d5db", cursor:completo?"pointer":"not-allowed", border:"none" }}>
+          Enviar respuesta →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Vista Líder ───────────────────────────────────────────────────────────────
+function VistaLider({ data, save, userId }) {
+  const lider = data.lideres.find(l => l.id===userId);
+  const estado = getEstadoLider(userId, data);
+  const [tab, setTab] = useState("resultados");
+  const plan = data.planesAccion?.find(p => p.liderId===userId && p.ciclo===data.cicloActivo);
+  const [form, setForm] = useState({ acciones:plan?.acciones||"", responsable:plan?.responsable||lider?.nombre||"", fecha:plan?.fecha||"", estado:plan?.estado||"En curso", obs:plan?.obs||"" });
+
+  const guardarPlan = () => {
+    const planes = data.planesAccion?.filter(p => !(p.liderId===userId && p.ciclo===data.cicloActivo))||[];
+    save({ ...data, planesAccion:[...planes,{ liderId:userId, ciclo:data.cicloActivo, cargadoPor:"Líder", ...form }] });
+  };
+
+  if (!estado) return <div className="p-8 text-center text-gray-400">Sin datos suficientes para este ciclo.</div>;
+  const cm = CLUSTER_META[estado.cluster];
+
+  return (
+    <div className="max-w-2xl mx-auto p-4 space-y-4">
+      <div className="bg-white rounded-2xl shadow p-5" style={{ borderLeft:`4px solid ${BRAND.orange}` }}>
+        <h2 className="font-bold text-lg" style={{ color: BRAND.darkGray }}>{lider?.nombre}</h2>
+        <p className="text-sm" style={{ color: BRAND.teal }}>{cicloLabel(data.cicloActivo)}</p>
+      </div>
+      <div className="flex gap-2">
+        {[["resultados","Mis Resultados"],["plan","Plan de Acción"]].map(([k,l]) => (
+          <button key={k} onClick={() => setTab(k)}
+            className="px-4 py-2 rounded-lg text-sm font-medium"
+            style={{ background:tab===k?BRAND.orange:"#f1f5f9", color:tab===k?"white":BRAND.darkGray, border:"none", cursor:"pointer" }}>{l}</button>
+        ))}
+      </div>
+
+      {tab==="resultados" && (
+        <div className="space-y-3">
+          {/* CTA Banner */}
+          <div className="rounded-2xl p-5 text-white text-center" style={{ background: BRAND.gradOrange }}>
+            <p className="text-sm opacity-80 mb-1">Tu señal este mes</p>
+            <p className="text-3xl font-bold mb-1">{estado.last.scoreTotal}<span className="text-lg font-normal">/100</span></p>
+            <div className="inline-block px-4 py-2 rounded-full mt-1" style={{ background:"rgba(255,255,255,0.2)" }}>
+              <p className="font-bold text-lg">{cm.cta}</p>
+            </div>
+          </div>
+          {/* 3 dimensiones */}
+          <div className="grid grid-cols-3 gap-3">
+            {[["Liderazgo","scoreLiderazgo","40%"],["Cultura","scoreCultura","30%"],["Estado","scoreEstado","30%"]].map(([label,key,peso]) => (
+              <div key={key} className="bg-white rounded-xl shadow p-4 text-center">
+                <p className="text-xs text-gray-400 mb-1">{label}</p>
+                <p className="text-3xl font-bold" style={{ color: BRAND.teal }}>{estado.last[key]}</p>
+              </div>
+            ))}
+          </div>
+          {/* Tendencia */}
+          <div className="bg-white rounded-xl shadow p-4 flex justify-around text-center">
+            <div><p className="text-xs text-gray-400">Tendencia</p><p className="font-semibold text-sm" style={{ color: estado.tendencia.label==="Mejora"?BRAND.teal:estado.tendencia.label==="Deterioro"?"#dc2626":BRAND.darkGray }}>{estado.tendencia.label}</p></div>
+            <div><p className="text-xs text-gray-400">Variación</p><p className="font-semibold text-sm">{estado.tendencia.pts>0?"+":""}{estado.tendencia.pts} pts</p></div>
+            <div><p className="text-xs text-gray-400">Recurrencia</p><p className="font-semibold text-sm">{estado.recurrencia}x bajo 60</p></div>
+          </div>
+          {/* Alertas */}
+          {estado.alertas.length>0 && (
+            <div className="rounded-xl p-3" style={{ background:"#fef2f2", border:"1px solid #fecaca" }}>
+              <p className="font-semibold text-sm mb-1" style={{ color:"#dc2626" }}>⚠️ Señales de atención</p>
+              {estado.alertas.map(a => <p key={a} className="text-sm" style={{ color:"#dc2626" }}>· {a}</p>)}
+            </div>
+          )}
+          {/* Historial */}
+          <div className="bg-white rounded-xl shadow p-4">
+            <p className="font-semibold text-sm mb-3" style={{ color: BRAND.darkGray }}>Historial de ciclos</p>
+            {estado.hist.map(h => (
+              <div key={h.ciclo} className="flex justify-between items-center text-sm border-b pb-2 mb-2 last:border-0">
+                <span className="text-gray-500">{cicloLabel(h.ciclo)}</span>
+                <span className="font-bold" style={{ color: BRAND.darkGray }}>{h.scoreTotal}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {tab==="plan" && (
+        <div className="bg-white rounded-xl shadow p-5 space-y-3">
+          <h3 className="font-bold" style={{ color: BRAND.darkGray }}>Plan de Acción — {cicloLabel(data.cicloActivo)}</h3>
+          <div>
+            <label className="text-xs font-medium text-gray-500">Acciones definidas</label>
+            <textarea rows={3} className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={form.acciones} onChange={e=>setForm(f=>({...f,acciones:e.target.value}))} placeholder="Describí las acciones concretas..." />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="text-xs font-medium text-gray-500">Responsable</label><input className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={form.responsable} onChange={e=>setForm(f=>({...f,responsable:e.target.value}))} /></div>
+            <div><label className="text-xs font-medium text-gray-500">Fecha compromiso</label><input type="date" className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={form.fecha} onChange={e=>setForm(f=>({...f,fecha:e.target.value}))} /></div>
+          </div>
+          <div><label className="text-xs font-medium text-gray-500">Estado</label>
+            <select className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={form.estado} onChange={e=>setForm(f=>({...f,estado:e.target.value}))}>
+              <option>En curso</option><option>Completado</option><option>Sin acción requerida</option>
+            </select>
+          </div>
+          <div><label className="text-xs font-medium text-gray-500">Observaciones</label><textarea rows={2} className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={form.obs} onChange={e=>setForm(f=>({...f,obs:e.target.value}))} /></div>
+          <button onClick={guardarPlan} className="w-full py-2 rounded-lg text-white font-semibold text-sm" style={{ background:BRAND.gradOrange, border:"none", cursor:"pointer" }}>Guardar Plan</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Vista Líder del Líder ─────────────────────────────────────────────────────
+function VistaLiderDelLider({ data, save, userId }) {
+  const ll = data.lideresDeLider?.find(l => l.id===userId);
+  const lideresACargo = data.lideres.filter(l => ll?.lideresACargo?.includes(l.id));
+  const [selLider, setSelLider] = useState(null);
+  const [obs, setObs] = useState("");
+
+  return (
+    <div className="max-w-3xl mx-auto p-4 space-y-4">
+      <div className="bg-white rounded-2xl shadow p-5" style={{ borderLeft:`4px solid ${BRAND.teal}` }}>
+        <h2 className="font-bold text-lg" style={{ color: BRAND.darkGray }}>{ll?.nombre} — Líderes a cargo</h2>
+        <p className="text-sm" style={{ color: BRAND.teal }}>{cicloLabel(data.cicloActivo)}</p>
+      </div>
+      <div className="space-y-3">
+        {lideresACargo.map(lider => {
+          const est = getEstadoLider(lider.id, data);
+          const cm = est ? CLUSTER_META[est.cluster] : null;
+          const plan = data.planesAccion?.find(p => p.liderId===lider.id && p.ciclo===data.cicloActivo);
+          return (
+            <div key={lider.id} className="bg-white rounded-xl shadow p-4">
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <p className="font-bold" style={{ color: BRAND.darkGray }}>{lider.nombre}</p>
+                  {est && <p className="text-sm text-gray-400">Score: <strong>{est.last.scoreTotal}</strong> · {est.tendencia.label}</p>}
+                </div>
+                {cm && <span className="px-3 py-1 rounded-full text-sm font-semibold" style={{ background:cm.bg, color:cm.color }}>{cm.icon} {est.cluster}</span>}
+              </div>
+              {est?.alertas?.length>0 && <div className="rounded-lg p-2 mb-2" style={{ background:"#fef2f2" }}><p className="text-xs" style={{ color:"#dc2626" }}>⚠️ {est.alertas.join(" · ")}</p></div>}
+              {plan && (
+                <div className="rounded-lg p-3 mb-2" style={{ background:"#f8fafc" }}>
+                  <p className="text-xs font-semibold text-gray-500 mb-1">Plan de Acción</p>
+                  <p className="text-sm text-gray-700">{plan.acciones}</p>
+                  <div className="flex gap-3 mt-1">
+                    <span className="text-xs text-gray-400">📅 {plan.fecha}</span>
+                    <span className="text-xs font-medium" style={{ color:plan.estado==="Completado"?"#16a34a":plan.estado==="En curso"?BRAND.orange:"#6b7280" }}>● {plan.estado}</span>
+                  </div>
+                </div>
+              )}
+              <button onClick={() => setSelLider(selLider===lider.id?null:lider.id)} className="text-sm hover:underline" style={{ color:BRAND.teal, background:"none", border:"none", cursor:"pointer" }}>
+                {selLider===lider.id?"Cerrar ↑":"Agregar observación →"}
+              </button>
+              {selLider===lider.id && (
+                <div className="mt-3 space-y-2">
+                  <textarea rows={2} className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Observaciones del seguimiento..." value={obs} onChange={e=>setObs(e.target.value)} />
+                  <button onClick={() => {
+                    const planes = data.planesAccion?.filter(p=>!(p.liderId===lider.id&&p.ciclo===data.cicloActivo&&p.cargadoPor==="LíderDelLider"))||[];
+                    save({...data,planesAccion:[...planes,{liderId:lider.id,ciclo:data.cicloActivo,cargadoPor:"LíderDelLider",obs,acciones:plan?.acciones||"",responsable:ll?.nombre,fecha:plan?.fecha||"",estado:plan?.estado||"En curso"}]});
+                    setObs(""); setSelLider(null);
+                  }} className="px-4 py-1 rounded-lg text-white text-sm font-semibold" style={{ background:BRAND.gradTeal, border:"none", cursor:"pointer" }}>Guardar</button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Vista Dashboard LT/HR ─────────────────────────────────────────────────────
+function VistaDashboard({ data, save }) {
+  const [tab, setTab] = useState("mapa");
+  const tabs = [["mapa","🗺️ Mapa"],["seguimiento","📋 Seguimiento"],["alertas","⚠️ Alertas"],["conv","💬 Conversaciones"]];
+
+  const clusterCounts = Object.keys(CLUSTER_META).map(cl => ({
+    cl, icon: CLUSTER_META[cl].icon, n: data.lideres.filter(l => { const e=getEstadoLider(l.id,data); return e?.cluster===cl; }).length
+  }));
+
+  return (
+    <div className="max-w-5xl mx-auto p-4 space-y-4">
+      <div className="bg-white rounded-2xl shadow p-5">
+        <div className="flex justify-between items-start flex-wrap gap-4">
+          <div>
+            <h2 className="font-bold text-lg" style={{ color: BRAND.darkGray }}>Dashboard — LT / HR</h2>
+            <p className="text-sm" style={{ color: BRAND.teal }}>{cicloLabel(data.cicloActivo)}</p>
+          </div>
+          <div className="flex gap-4">
+            {clusterCounts.map(({cl,icon,n}) => (
+              <div key={cl} className="text-center">
+                <p className="text-2xl font-bold" style={{ color: CLUSTER_META[cl].color }}>{n}</p>
+                <p className="text-xs text-gray-400">{icon}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="flex gap-2 flex-wrap">
+        {tabs.map(([k,l]) => (
+          <button key={k} onClick={()=>setTab(k)} className="px-4 py-2 rounded-lg text-sm font-medium"
+            style={{ background:tab===k?BRAND.orange:"#f1f5f9", color:tab===k?"white":BRAND.darkGray, border:"none", cursor:"pointer" }}>{l}</button>
+        ))}
+      </div>
+      {tab==="mapa"        && <MapaLiderazgo data={data} save={save} />}
+      {tab==="seguimiento" && <Seguimiento data={data} />}
+      {tab==="alertas"     && <Alertas data={data} />}
+      {tab==="conv"        && <Conversaciones data={data} save={save} />}
+    </div>
+  );
+}
+
+function MapaLiderazgo({ data, save }) {
+  const [sel, setSel] = useState(null);
+  const [pf, setPf] = useState({ acciones:"",responsable:"",fecha:"",estado:"En curso",obs:"",pdi:"No",escala:"No" });
+
+  return (
+    <div className="space-y-3">
+      {data.lideres.map(lider => {
+        const est = getEstadoLider(lider.id, data);
+        if (!est) return <div key={lider.id} className="bg-white rounded-xl shadow p-4 text-gray-400 text-sm">{lider.nombre} — Sin datos suficientes</div>;
+        const cm = CLUSTER_META[est.cluster];
+        const plan = data.planesAccion?.find(p => p.liderId===lider.id && p.ciclo===data.cicloActivo);
+        return (
+          <div key={lider.id} className="bg-white rounded-xl shadow p-4">
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div className="flex items-center gap-3">
+                <div>
+                  <p className="font-bold" style={{ color: BRAND.darkGray }}>{lider.nombre}</p>
+                  <p className="text-xs text-gray-400">{lider.email}</p>
+                </div>
+                <span className="px-3 py-1 rounded-full text-sm font-semibold" style={{ background:cm.bg, color:cm.color }}>{cm.icon} {est.cluster}</span>
+              </div>
+              <div className="flex gap-5 text-center">
+                <div><p className="text-2xl font-bold" style={{ color:BRAND.orange }}>{est.last.scoreTotal}</p><p className="text-xs text-gray-400">Total</p></div>
+                <div><p className="text-sm font-semibold" style={{ color:est.tendencia.label==="Mejora"?BRAND.teal:est.tendencia.label==="Deterioro"?"#dc2626":BRAND.darkGray }}>{est.tendencia.label}</p><p className="text-xs text-gray-400">{est.tendencia.pts>0?"+":""}{est.tendencia.pts} pts</p></div>
+                <div><p className="text-sm font-semibold" style={{ color:BRAND.darkGray }}>{est.recurrencia}x</p><p className="text-xs text-gray-400">Recurrencia</p></div>
+              </div>
+              <button onClick={() => { setSel(sel===lider.id?null:lider.id); setPf({ acciones:plan?.acciones||"",responsable:plan?.responsable||"",fecha:plan?.fecha||"",estado:plan?.estado||"En curso",obs:plan?.obs||"",pdi:plan?.pdi||"No",escala:plan?.escala||"No" }); }}
+                className="px-3 py-1 rounded-lg text-sm font-medium"
+                style={{ border:`1px solid ${BRAND.orange}`, color:BRAND.orange, background:"transparent", cursor:"pointer" }}>
+                {sel===lider.id?"Cerrar":"Gestionar"}
+              </button>
+            </div>
+            {est.alertas.length>0 && <div className="mt-2 rounded-lg p-2" style={{ background:"#fef2f2" }}><p className="text-xs" style={{ color:"#dc2626" }}>⚠️ {est.alertas.join(" · ")}</p></div>}
+            {sel===lider.id && (
+              <div className="mt-4 border-t pt-4 space-y-3">
+                <h4 className="font-semibold text-sm" style={{ color:BRAND.darkGray }}>Plan de Acción — {cicloLabel(data.cicloActivo)}</h4>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="col-span-2"><label className="text-xs text-gray-400">Acciones</label><textarea rows={2} className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={pf.acciones} onChange={e=>setPf(f=>({...f,acciones:e.target.value}))} /></div>
+                  <div><label className="text-xs text-gray-400">Responsable</label><input className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={pf.responsable} onChange={e=>setPf(f=>({...f,responsable:e.target.value}))} /></div>
+                  <div><label className="text-xs text-gray-400">Fecha compromiso</label><input type="date" className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={pf.fecha} onChange={e=>setPf(f=>({...f,fecha:e.target.value}))} /></div>
+                  <div><label className="text-xs text-gray-400">Estado del plan</label>
+                    <select className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={pf.estado} onChange={e=>setPf(f=>({...f,estado:e.target.value}))}>
+                      <option>En curso</option><option>Completado</option><option>Sin acción requerida</option>
+                    </select>
+                  </div>
+                  <div><label className="text-xs text-gray-400">Vinculación PDI</label>
+                    <select className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={pf.pdi} onChange={e=>setPf(f=>({...f,pdi:e.target.value}))}>
+                      <option>No</option><option>Sí</option>
+                    </select>
+                  </div>
+                  <div className="col-span-2"><label className="text-xs text-gray-400">Escalamiento a comité</label>
+                    <select className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={pf.escala} onChange={e=>setPf(f=>({...f,escala:e.target.value}))}>
+                      <option>No</option><option>Sí</option>
+                    </select>
+                  </div>
+                  <div className="col-span-2"><label className="text-xs text-gray-400">Observaciones LT</label><textarea rows={2} className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={pf.obs} onChange={e=>setPf(f=>({...f,obs:e.target.value}))} /></div>
+                </div>
+                <button onClick={() => {
+                  const planes = data.planesAccion?.filter(p=>!(p.liderId===lider.id&&p.ciclo===data.cicloActivo))||[];
+                  save({...data,planesAccion:[...planes,{liderId:lider.id,ciclo:data.cicloActivo,cargadoPor:"LT/HR",...pf}]});
+                  setSel(null);
+                }} className="px-6 py-2 rounded-lg text-white font-semibold text-sm" style={{ background:BRAND.gradOrange, border:"none", cursor:"pointer" }}>Guardar Plan</button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Seguimiento({ data }) {
+  const planes = data.planesAccion?.filter(p => p.estado==="En curso")||[];
+  return (
+    <div className="bg-white rounded-xl shadow p-5">
+      <h3 className="font-bold mb-4" style={{ color:BRAND.darkGray }}>Planes de Acción Activos</h3>
+      {planes.length===0 && <p className="text-gray-400 text-sm">No hay planes en curso.</p>}
+      <div className="space-y-3">
+        {planes.map((p,i) => {
+          const lider = data.lideres.find(l=>l.id===p.liderId);
+          const est = getEstadoLider(p.liderId,data);
+          const cm = est ? CLUSTER_META[est.cluster]:null;
+          return (
+            <div key={i} className="border rounded-xl p-4">
+              <div className="flex justify-between items-start mb-2">
+                <div><p className="font-semibold" style={{ color:BRAND.darkGray }}>{lider?.nombre}</p><p className="text-xs text-gray-400">{cicloLabel(p.ciclo)} · {p.cargadoPor}</p></div>
+                {cm && <span className="px-2 py-1 rounded-full text-xs font-semibold" style={{ background:cm.bg,color:cm.color }}>{cm.icon} {est.cluster}</span>}
+              </div>
+              <p className="text-sm text-gray-600 mb-2">{p.acciones}</p>
+              <div className="flex gap-4 text-xs text-gray-400">
+                <span>📅 {p.fecha||"Sin fecha"}</span>
+                <span>👤 {p.responsable}</span>
+                <span>PDI: {p.pdi}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function Alertas({ data }) {
+  const alertasLideres = data.lideres.map(l => { const est=getEstadoLider(l.id,data); return est?.alertas?.length ? {lider:l,est} : null; }).filter(Boolean);
+  return (
+    <div className="space-y-3">
+      {(data.alertasAsignacion||[]).length>0 && (
+        <div className="bg-white rounded-xl shadow p-5">
+          <h3 className="font-bold mb-3" style={{ color:BRAND.darkGray }}>⚠️ Alertas de Asignación</h3>
+          {(data.alertasAsignacion||[]).map((a,i)=>(
+            <div key={i} className="border-l-4 pl-3 py-2 mb-2" style={{ borderColor:BRAND.orange }}>
+              <p className="text-sm font-semibold" style={{ color:BRAND.darkGray }}>{a.nombre}</p>
+              <p className="text-xs text-gray-400">{cicloLabel(a.ciclo)} · {a.fecha} · El colaborador indicó que el líder asignado es incorrecto.</p>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="bg-white rounded-xl shadow p-5">
+        <h3 className="font-bold mb-3" style={{ color:BRAND.darkGray }}>🚨 Alertas de Liderazgo</h3>
+        {alertasLideres.length===0 && <p className="text-gray-400 text-sm">Sin alertas activas. ✅</p>}
+        {alertasLideres.map(({lider,est})=>{
+          const cm=CLUSTER_META[est.cluster];
+          return (
+            <div key={lider.id} className="border rounded-xl p-4 mb-3">
+              <div className="flex justify-between items-center mb-1">
+                <p className="font-semibold" style={{ color:BRAND.darkGray }}>{lider.nombre}</p>
+                <span className="px-2 py-1 rounded-full text-xs font-semibold" style={{ background:cm.bg,color:cm.color }}>{cm.icon} {est.cluster}</span>
+              </div>
+              {est.alertas.map(a=><p key={a} className="text-sm" style={{ color:"#dc2626" }}>· {a}</p>)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function Conversaciones({ data, save }) {
+  const [form, setForm] = useState({ liderId:"",tipo:"LT-Líder",fecha:"",resumen:"",ciclo:data.cicloActivo });
+  const convs = data.conversaciones||[];
+  const guardar = () => {
+    if (!form.liderId||!form.resumen) return;
+    save({...data,conversaciones:[...convs,{...form,id:Date.now()}]});
+    setForm({liderId:"",tipo:"LT-Líder",fecha:"",resumen:"",ciclo:data.cicloActivo});
+  };
+  return (
+    <div className="space-y-3">
+      <div className="bg-white rounded-xl shadow p-5">
+        <h3 className="font-bold mb-4" style={{ color:BRAND.darkGray }}>Registrar Conversación</h3>
+        <div className="grid grid-cols-2 gap-3">
+          <div><label className="text-xs text-gray-400">Líder</label>
+            <select className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={form.liderId} onChange={e=>setForm(f=>({...f,liderId:e.target.value}))}>
+              <option value="">Seleccionar</option>{data.lideres.map(l=><option key={l.id} value={l.id}>{l.nombre}</option>)}
+            </select>
+          </div>
+          <div><label className="text-xs text-gray-400">Tipo</label>
+            <select className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={form.tipo} onChange={e=>setForm(f=>({...f,tipo:e.target.value}))}>
+              <option>LT-Líder</option><option>LT-Colaborador</option><option>LT-Líder del Líder</option>
+            </select>
+          </div>
+          <div><label className="text-xs text-gray-400">Fecha</label><input type="date" className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={form.fecha} onChange={e=>setForm(f=>({...f,fecha:e.target.value}))} /></div>
+          <div><label className="text-xs text-gray-400">Ciclo</label><input className="w-full mt-1 border rounded-lg px-3 py-2 text-sm bg-gray-50" value={cicloLabel(form.ciclo)} readOnly /></div>
+          <div className="col-span-2"><label className="text-xs text-gray-400">Resumen</label><textarea rows={3} className="w-full mt-1 border rounded-lg px-3 py-2 text-sm" value={form.resumen} onChange={e=>setForm(f=>({...f,resumen:e.target.value}))} placeholder="Puntos clave de la conversación..." /></div>
+        </div>
+        <button onClick={guardar} className="mt-3 px-6 py-2 rounded-lg text-white font-semibold text-sm" style={{ background:BRAND.gradOrange,border:"none",cursor:"pointer" }}>Registrar</button>
+      </div>
+      <div className="bg-white rounded-xl shadow p-5">
+        <h3 className="font-bold mb-3" style={{ color:BRAND.darkGray }}>Historial</h3>
+        {convs.length===0 && <p className="text-gray-400 text-sm">Sin conversaciones registradas.</p>}
+        {convs.slice().reverse().map(c=>{
+          const lider=data.lideres.find(l=>l.id===c.liderId);
+          return (
+            <div key={c.id} className="border-b pb-3 mb-3 last:border-0">
+              <div className="flex justify-between items-center mb-1">
+                <p className="font-semibold text-sm" style={{ color:BRAND.darkGray }}>{lider?.nombre}</p>
+                <span className="text-xs text-gray-400">{c.fecha} · {c.tipo}</span>
+              </div>
+              <p className="text-sm text-gray-600">{c.resumen}</p>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Vista Admin ───────────────────────────────────────────────────────────────
+function VistaAdmin({ data, save }) {
+  const [tab, setTab] = useState("lideres");
+  const [nl, setNl] = useState({ nombre:"",email:"" });
+  const [nc, setNc] = useState({ nombre:"",email:"",liderId:"" });
+  const [newCiclo, setNewCiclo] = useState({ anio:"2025", mes:"01" });
+
+  const addLider = () => { if(!nl.nombre)return; save({...data,lideres:[...data.lideres,{id:"L"+Date.now(),...nl}]}); setNl({nombre:"",email:""}); };
+  const addColab = () => { if(!nc.nombre||!nc.liderId)return; save({...data,colaboradores:[...data.colaboradores,{id:"C"+Date.now(),...nc}]}); setNc({nombre:"",email:"",liderId:""}); };
+  const addCiclo = () => {
+    const key = `${newCiclo.anio}-M${newCiclo.mes}`;
+    if(data.ciclos.includes(key))return;
+    save({...data,ciclos:[...data.ciclos,key],cicloActivo:key});
+  };
+
+  return (
+    <div className="max-w-3xl mx-auto p-4 space-y-4">
+      <div className="bg-white rounded-2xl shadow p-5" style={{ borderLeft:`4px solid ${BRAND.orange}` }}>
+        <h2 className="font-bold text-lg" style={{ color:BRAND.darkGray }}>Panel de Administración</h2>
+        <p className="text-sm" style={{ color:BRAND.teal }}>Ciclo activo: {cicloLabel(data.cicloActivo)}</p>
+      </div>
+      <div className="flex gap-2 flex-wrap">
+        {[["lideres","Líderes"],["colaboradores","Colaboradores"],["ciclos","Ciclos"],["alertas","Alertas"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setTab(k)} className="px-4 py-2 rounded-lg text-sm font-medium"
+            style={{ background:tab===k?BRAND.orange:"#f1f5f9", color:tab===k?"white":BRAND.darkGray, border:"none", cursor:"pointer" }}>
+            {l}{k==="alertas"&&(data.alertasAsignacion||[]).length>0&&<span className="ml-1 text-xs px-1 rounded-full" style={{ background:"#dc2626",color:"white" }}>{data.alertasAsignacion.length}</span>}
+          </button>
+        ))}
+      </div>
+
+      {tab==="lideres" && (
+        <div className="bg-white rounded-xl shadow p-5 space-y-4">
+          <h3 className="font-bold text-sm" style={{ color:BRAND.darkGray }}>Líderes registrados</h3>
+          <div className="space-y-2">
+            {data.lideres.map(l=>(
+              <div key={l.id} className="flex justify-between items-center border rounded-lg px-4 py-2">
+                <div><p className="font-medium text-sm" style={{ color:BRAND.darkGray }}>{l.nombre}</p><p className="text-xs text-gray-400">{l.email}</p></div>
+                <button onClick={()=>{if(window.confirm("¿Eliminar?"))save({...data,lideres:data.lideres.filter(x=>x.id!==l.id)})}} className="text-xs" style={{ color:"#dc2626",background:"none",border:"none",cursor:"pointer" }}>Eliminar</button>
+              </div>
+            ))}
+          </div>
+          <div className="border-t pt-4">
+            <p className="text-xs font-semibold mb-2" style={{ color:BRAND.darkGray }}>Agregar líder</p>
+            <div className="grid grid-cols-2 gap-2">
+              <input className="border rounded-lg px-3 py-2 text-sm" placeholder="Nombre" value={nl.nombre} onChange={e=>setNl(f=>({...f,nombre:e.target.value}))} />
+              <input className="border rounded-lg px-3 py-2 text-sm" placeholder="Email" value={nl.email} onChange={e=>setNl(f=>({...f,email:e.target.value}))} />
+            </div>
+            <button onClick={addLider} className="mt-2 px-4 py-2 rounded-lg text-white text-sm font-semibold" style={{ background:BRAND.gradOrange,border:"none",cursor:"pointer" }}>Agregar</button>
+          </div>
+        </div>
+      )}
+
+      {tab==="colaboradores" && (
+        <div className="bg-white rounded-xl shadow p-5 space-y-4">
+          <h3 className="font-bold text-sm" style={{ color:BRAND.darkGray }}>Nómina de colaboradores</h3>
+          <div className="space-y-2">
+            {data.colaboradores.map(c=>{
+              const lider=data.lideres.find(l=>l.id===c.liderId);
+              return (
+                <div key={c.id} className="border rounded-lg px-4 py-2">
+                  <div className="flex justify-between items-center">
+                    <div><p className="font-medium text-sm" style={{ color:BRAND.darkGray }}>{c.nombre}</p><p className="text-xs text-gray-400">{c.email}</p></div>
+                    <button onClick={()=>{if(window.confirm("¿Eliminar?"))save({...data,colaboradores:data.colaboradores.filter(x=>x.id!==c.id)})}} className="text-xs" style={{ color:"#dc2626",background:"none",border:"none",cursor:"pointer" }}>Eliminar</button>
+                  </div>
+                  <div className="flex items-center gap-2 mt-2">
+                    <span className="text-xs text-gray-400">Líder asignado:</span>
+                    <select className="border rounded px-2 py-1 text-xs" value={c.liderId} onChange={e=>{ const cols=data.colaboradores.map(x=>x.id===c.id?{...x,liderId:e.target.value}:x); save({...data,colaboradores:cols}); }}>
+                      <option value="">Sin asignar</option>
+                      {data.lideres.map(l=><option key={l.id} value={l.id}>{l.nombre}</option>)}
+                    </select>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="border-t pt-4">
+            <p className="text-xs font-semibold mb-2" style={{ color:BRAND.darkGray }}>Agregar colaborador</p>
+            <div className="grid grid-cols-2 gap-2">
+              <input className="border rounded-lg px-3 py-2 text-sm" placeholder="Nombre" value={nc.nombre} onChange={e=>setNc(f=>({...f,nombre:e.target.value}))} />
+              <input className="border rounded-lg px-3 py-2 text-sm" placeholder="Email" value={nc.email} onChange={e=>setNc(f=>({...f,email:e.target.value}))} />
+              <select className="border rounded-lg px-3 py-2 text-sm col-span-2" value={nc.liderId} onChange={e=>setNc(f=>({...f,liderId:e.target.value}))}>
+                <option value="">Asignar líder</option>
+                {data.lideres.map(l=><option key={l.id} value={l.id}>{l.nombre}</option>)}
+              </select>
+            </div>
+            <button onClick={addColab} className="mt-2 px-4 py-2 rounded-lg text-white text-sm font-semibold" style={{ background:BRAND.gradOrange,border:"none",cursor:"pointer" }}>Agregar</button>
+          </div>
+        </div>
+      )}
+
+      {tab==="ciclos" && (
+        <div className="bg-white rounded-xl shadow p-5 space-y-4">
+          <h3 className="font-bold text-sm" style={{ color:BRAND.darkGray }}>Ciclos de medición</h3>
+          <div className="space-y-2">
+            {data.ciclos.map(c=>(
+              <div key={c} className="flex justify-between items-center border rounded-lg px-4 py-2">
+                <p className="text-sm font-medium" style={{ color:BRAND.darkGray }}>{cicloLabel(c)}</p>
+                {c===data.cicloActivo
+                  ? <span className="text-xs px-2 py-1 rounded-full text-white" style={{ background:BRAND.teal }}>Activo</span>
+                  : <button onClick={()=>save({...data,cicloActivo:c})} className="text-xs hover:underline" style={{ color:BRAND.teal,background:"none",border:"none",cursor:"pointer" }}>Activar</button>}
+              </div>
+            ))}
+          </div>
+          <div className="border-t pt-4">
+            <p className="text-xs font-semibold mb-2" style={{ color:BRAND.darkGray }}>Crear nuevo ciclo</p>
+            <div className="flex gap-2">
+              <input className="border rounded-lg px-3 py-2 text-sm w-24" placeholder="Año" value={newCiclo.anio} onChange={e=>setNewCiclo(f=>({...f,anio:e.target.value}))} />
+              <select className="border rounded-lg px-3 py-2 text-sm flex-1" value={newCiclo.mes} onChange={e=>setNewCiclo(f=>({...f,mes:e.target.value}))}>
+                {MESES.map((m,i)=><option key={i} value={String(i+1).padStart(2,"0")}>{m}</option>)}
+              </select>
+              <button onClick={addCiclo} className="px-4 py-2 rounded-lg text-white text-sm font-semibold" style={{ background:BRAND.gradOrange,border:"none",cursor:"pointer" }}>Crear</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab==="alertas" && (
+        <div className="bg-white rounded-xl shadow p-5">
+          <h3 className="font-bold mb-3" style={{ color:BRAND.darkGray }}>Alertas de asignación incorrecta</h3>
+          {(data.alertasAsignacion||[]).length===0 && <p className="text-gray-400 text-sm">Sin alertas pendientes. ✅</p>}
+          {(data.alertasAsignacion||[]).map((a,i)=>(
+            <div key={i} className="border-l-4 pl-3 py-2 mb-3 flex justify-between items-start" style={{ borderColor:BRAND.orange }}>
+              <div>
+                <p className="font-semibold text-sm" style={{ color:BRAND.darkGray }}>{a.nombre}</p>
+                <p className="text-xs text-gray-400">{cicloLabel(a.ciclo)} · {a.fecha}</p>
+                <p className="text-xs text-gray-400">Indicó que su líder asignado es incorrecto.</p>
+              </div>
+              <button onClick={()=>{ const al=(data.alertasAsignacion||[]).filter((_,idx)=>idx!==i); save({...data,alertasAsignacion:al}); }}
+                className="text-xs hover:underline ml-4" style={{ color:"#16a34a",background:"none",border:"none",cursor:"pointer" }}>Resolver ✓</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
